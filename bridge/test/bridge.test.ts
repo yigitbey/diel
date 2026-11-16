@@ -168,3 +168,43 @@ test("watch socket: rejects bad token, serves state and commands with a good one
   await server.close();
   done();
 });
+
+test("pairing window hands the token to one watch, presence needs the token", async () => {
+  const { agent, done } = await setup();
+  const changes: boolean[] = [];
+  const server = await startServer(agent, {
+    port: 0,
+    host: "127.0.0.1",
+    token: "secret-token",
+    identity: { id: "mac1", name: "Test Mac", idleSeconds: () => 42 },
+    onPairingChange: (open) => changes.push(open),
+  });
+  const port = (server.http.address() as { port: number }).port;
+  const ask = (msg: object) =>
+    new Promise<{ frames: any[]; code: number }>((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/watch`);
+      const frames: any[] = [];
+      ws.on("message", (d) => frames.push(JSON.parse(d.toString())));
+      ws.on("open", () => ws.send(JSON.stringify(msg)));
+      ws.on("close", (code) => resolve({ frames, code }));
+    });
+
+  // Closed by default.
+  assert.equal((await ask({ type: "pair", device: "watch" })).code, 4403);
+
+  // Only this Mac can open it.
+  const open = await fetch(`http://127.0.0.1:${port}/pair-mode`, { method: "POST" });
+  assert.equal(open.status, 200);
+  const paired = await ask({ type: "pair", device: "watch" });
+  assert.deepEqual(paired.frames[0], { type: "paired", id: "mac1", name: "Test Mac", token: "secret-token" });
+  // One watch per window.
+  assert.equal((await ask({ type: "pair", device: "other" })).code, 4403);
+  assert.deepEqual(changes, [true, false]);
+
+  assert.equal((await fetch(`http://127.0.0.1:${port}/presence`)).status, 401);
+  const presence = await fetch(`http://127.0.0.1:${port}/presence`, { headers: { authorization: "Bearer secret-token" } });
+  assert.deepEqual(await presence.json(), { id: "mac1", name: "Test Mac", idleSeconds: 42, status: "idle" });
+
+  await server.close();
+  done();
+});

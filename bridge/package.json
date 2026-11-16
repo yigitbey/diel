@@ -8,6 +8,7 @@
   "scripts": {
     "start": "node src/main.ts",
     "test": "node --test --test-force-exit test/*.test.ts",
+    "pair": "node scripts/pair.ts",
     "pair-watch": "node scripts/pair-watch.ts",
     "spike": "node spike/probe.ts"
   },

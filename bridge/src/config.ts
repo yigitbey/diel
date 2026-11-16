@@ -4,7 +4,7 @@ import { homedir, networkInterfaces } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
-export const DIEL_DIR = join(homedir(), ".diel");
+export const DIEL_DIR = process.env.DIEL_HOME ?? join(homedir(), ".diel");
 export const PORT = Number(process.env.DIEL_PORT ?? 8791);
 
 /** Shared secret the watch must present. Created on first run, readable only by you. */
@@ -58,4 +58,42 @@ export function loadOpenAIKey(): string | null {
   const file = join(DIEL_DIR, "openai_key");
   if (!existsSync(file)) return null;
   return readFileSync(file, "utf8").trim() || null;
+}
+
+/** Stable id for this bridge, created on first run. */
+export function loadBridgeId(): string {
+  const file = join(DIEL_DIR, "id");
+  if (existsSync(file)) return readFileSync(file, "utf8").trim();
+  mkdirSync(DIEL_DIR, { recursive: true, mode: 0o700 });
+  const id = randomBytes(8).toString("hex");
+  writeFileSync(file, id + "\n", { mode: 0o600 });
+  return id;
+}
+
+/** The Mac's user-facing name, e.g. "Yigit's MacBook Pro". */
+export function macName(): string {
+  if (process.env.DIEL_NAME) return process.env.DIEL_NAME;
+  try {
+    return execFileSync("/usr/sbin/scutil", ["--get", "ComputerName"], { encoding: "utf8" }).trim() || "Mac";
+  } catch {
+    return "Mac";
+  }
+}
+
+let idleCache = { at: 0, value: 0 };
+/** Seconds since the last keyboard/mouse input on this Mac (cached for a second). */
+export function idleSeconds(): number {
+  if (process.env.DIEL_IDLE) return Number(process.env.DIEL_IDLE);
+  const now = Date.now();
+  if (now - idleCache.at < 1000) return idleCache.value;
+  let value = 0;
+  try {
+    const out = execFileSync("/usr/sbin/ioreg", ["-c", "IOHIDSystem", "-d", "4"], { encoding: "utf8" });
+    const m = out.match(/"HIDIdleTime" = (\d+)/);
+    if (m) value = Math.floor(Number(m[1]) / 1e9);
+  } catch {
+    // unknown: treat as active
+  }
+  idleCache = { at: now, value };
+  return value;
 }

@@ -23,14 +23,26 @@ Pixel Watch app  ⇄  Wi-Fi (token)  ⇄  bridge on the Mac  ⇄  Codex (app-ser
 
 ## Setup
 
-1. Bridge: `cd bridge && npm install`, then `./scripts/install-agent.sh` to run
-   it at login (logs in `~/.diel/bridge.log`; `./scripts/install-agent.sh uninstall`
+1. Bridge, on each Mac: `cd bridge && npm install`, then `./scripts/install-agent.sh`
+   to run it at login (logs in `~/.diel/bridge.log`; `./scripts/install-agent.sh uninstall`
    removes it). `npm start` runs it in the foreground instead.
 2. Live voice: put an OpenAI API key in `~/.diel/openai_key` (mode 600) and
-   restart the bridge. Without one, the watch falls back to dictate-and-send.
-3. Watch: `cd bridge && npm run pair-watch` writes the Mac's address and token
-   into `watch/bridge.properties`; then build and install over wireless adb:
+   rerun `./scripts/install-agent.sh`. Without one, the watch falls back to
+   dictate-and-send.
+3. Watch app, once: build and install over wireless adb with
    `cd watch && ./gradlew :app:installDebug`.
+4. Pair the watch with a Mac: run `npm run pair` in `bridge/` on that Mac, open
+   Diel on the watch, and tap **Pair**. Repeat on every Mac you use; no rebuild
+   needed.
+
+## Several Macs
+
+Each bridge announces itself on the network (Bonjour, `_diel._tcp`), so the watch
+finds paired Macs even when their addresses change. In **Auto** (the default)
+the watch talks to the paired Mac you used most recently: it moves once the
+current Mac has been untouched for 45 seconds and another one was used more
+recently, and never in the middle of a live conversation. Long-press the pet to
+pick a Mac yourself, go back to Auto, or long-press a Mac to forget it.
 
 The mock watch page at http://localhost:8791/ (served only to this Mac) lets you
 test the bridge without the watch.
@@ -49,5 +61,5 @@ Realtime servers.
   app, and progress is read from saved history every few seconds.
 - The watch mutes its mic while the voice speaks (no echo cancellation outside
   calls), so you can't interrupt it mid-sentence.
-- If the Mac's IP address changes, run `npm run pair-watch` and reinstall the
-  watch app.
+- Pairing hands the Mac's token to the first watch that asks within the
+  two-minute window, so only run `npm run pair` on a network you trust.

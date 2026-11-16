@@ -7,6 +7,8 @@
 //   DIEL_CODEX_BIN   codex binary to spawn when DIEL_CODEX_URL is not set
 //   DIEL_OPENAI_KEY  OpenAI API key for live voice (or put it in ~/.diel/openai_key)
 //   DIEL_VOICE       voice name for live voice (default marin)
+//   DIEL_HOME        folder for token, id and API key (default ~/.diel)
+//   DIEL_NAME        name shown on the watch (default: the Mac's computer name)
 //   DIEL_CWD         working directory for threads started from the watch
 
 import { homedir } from "node:os";
@@ -14,7 +16,8 @@ import { CodexClient, stdioTransport, wsTransport } from "./codex.ts";
 import { Agent } from "./state.ts";
 import { DesktopIpc } from "./desktop.ts";
 import { startServer } from "./server.ts";
-import { PORT, findCodexBin, lanAddress, loadOpenAIKey, loadToken } from "./config.ts";
+import { PORT, findCodexBin, idleSeconds, lanAddress, loadBridgeId, loadOpenAIKey, loadToken, macName } from "./config.ts";
+import { Announcer } from "./announce.ts";
 
 const agent = new Agent({ cwd: process.env.DIEL_CWD ?? homedir(), desktop: new DesktopIpc() });
 const token = loadToken();
@@ -51,12 +54,21 @@ async function keepConnected() {
 }
 
 const apiKey = loadOpenAIKey();
+const identity = { id: loadBridgeId(), name: macName(), idleSeconds };
+const announcer = new Announcer({ name: identity.name, port: PORT, id: identity.id });
 await startServer(agent, {
   port: PORT,
   token,
+  identity,
+  onPairingChange: (open) => {
+    announcer.setPairing(open);
+    console.log(open ? "pairing open for 2 minutes" : "pairing closed");
+  },
   voice: apiKey ? { apiKey, voice: process.env.DIEL_VOICE, model: process.env.DIEL_VOICE_MODEL } : null,
 });
 console.log(apiKey ? "live voice     enabled" : "live voice     off (no key in ~/.diel/openai_key); watch falls back to dictation");
 console.log(`watch endpoint  ws://${lanAddress() ?? "<no LAN address>"}:${PORT}/watch`);
 console.log(`mock watch page http://localhost:${PORT}/`);
+announcer.start();
+console.log(`announced as  "${identity.name}" (_diel._tcp)`);
 keepConnected();

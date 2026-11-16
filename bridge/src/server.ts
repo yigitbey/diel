@@ -44,12 +44,62 @@ export interface BridgeServer {
   close(): Promise<void>;
 }
 
-export function startServer(agent: Agent, opts: { port: number; host?: string; token: string; voice?: VoiceConfig | null }): Promise<BridgeServer> {
+export interface Identity {
+  /** Stable id of this Mac's bridge, so the watch can tell Macs apart when their addresses change. */
+  id: string;
+  /** Name shown on the watch, e.g. the Mac's computer name. */
+  name: string;
+  /** Seconds since the last keyboard or mouse input on this Mac. */
+  idleSeconds: () => number;
+}
+
+export interface ServerOptions {
+  port: number;
+  host?: string;
+  token: string;
+  voice?: VoiceConfig | null;
+  identity?: Identity;
+  /** Called when a pairing window opens or closes, e.g. to update the network announcement. */
+  onPairingChange?: (open: boolean) => void;
+}
+
+const PAIRING_WINDOW_MS = 120_000;
+
+export function startServer(agent: Agent, opts: ServerOptions): Promise<BridgeServer> {
+  const identity: Identity = opts.identity ?? { id: "local", name: "Mac", idleSeconds: () => 0 };
+  let pairingUntil = 0;
+  let pairingTimer: NodeJS.Timeout | null = null;
+  const pairingOpen = () => Date.now() < pairingUntil;
+  const setPairing = (open: boolean) => {
+    if (pairingTimer) clearTimeout(pairingTimer);
+    pairingTimer = null;
+    pairingUntil = open ? Date.now() + PAIRING_WINDOW_MS : 0;
+    if (open) pairingTimer = setTimeout(() => setPairing(false), PAIRING_WINDOW_MS);
+    opts.onPairingChange?.(open);
+  };
   const debugPage = readFileSync(new URL("./debug.html", import.meta.url), "utf8");
 
   const http = createServer((req, res) => {
     if (req.url === "/healthz") {
       res.writeHead(200, { "content-type": "text/plain" }).end("ok");
+      return;
+    }
+    // Lets a paired watch compare Macs and follow the one you're using.
+    if (req.url === "/presence" && req.method === "GET") {
+      const auth = String(req.headers.authorization ?? "").replace(/^Bearer /, "");
+      if (!tokenMatches(auth, opts.token)) {
+        res.writeHead(401).end();
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }).end(
+        JSON.stringify({ id: identity.id, name: identity.name, idleSeconds: identity.idleSeconds(), status: agent.snapshot().status }),
+      );
+      return;
+    }
+    // `npm run pair` on this Mac opens a short window in which one watch may pair.
+    if (req.url === "/pair-mode" && req.method === "POST" && isLoopback(req)) {
+      setPairing(true);
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ seconds: PAIRING_WINDOW_MS / 1000, name: identity.name }));
       return;
     }
     // The mock watch page embeds the token, so it is only ever served to this Mac.
@@ -64,7 +114,7 @@ export function startServer(agent: Agent, opts: { port: number; host?: string; t
 
   const wss = new WebSocketServer({ server: http, path: "/watch", maxPayload: 64 * 1024 });
   const authed = new Set<WebSocket>();
-  const frame = (snap: Snapshot) => JSON.stringify({ ...snap, voice: !!opts.voice });
+  const frame = (snap: Snapshot) => JSON.stringify({ ...snap, voice: !!opts.voice, mac: { id: identity.id, name: identity.name } });
 
   agent.on("change", (snap) => {
     const f = frame(snap);
@@ -95,6 +145,14 @@ export function startServer(agent: Agent, opts: { port: number; host?: string; t
       }
 
       if (!authed.has(ws)) {
+        // Pairing: while the window is open, the first watch that asks gets this Mac's token.
+        if (msg?.type === "pair") {
+          if (!pairingOpen()) return ws.close(4403, "pairing is closed");
+          setPairing(false);
+          ws.send(JSON.stringify({ type: "paired", id: identity.id, name: identity.name, token: opts.token }));
+          console.log(`paired with ${String(msg.device ?? "a watch").slice(0, 60)}`);
+          return ws.close(1000, "paired");
+        }
         if (msg?.type !== "hello" || !tokenMatches(msg.token, opts.token)) return ws.close(4401, "bad token");
         clearTimeout(timer);
         authed.add(ws);
@@ -164,6 +222,7 @@ export function startServer(agent: Agent, opts: { port: number; host?: string; t
         http,
         close: () =>
           new Promise((done) => {
+            if (pairingTimer) clearTimeout(pairingTimer);
             for (const ws of wss.clients) ws.terminate();
             wss.close(() => http.close(() => done()));
           }),

@@ -30,17 +30,24 @@ data class AgentState(
     val notice: String = "Connecting…",
     /** True when the Mac bridge can run a live voice session. */
     val voiceAvailable: Boolean = false,
+    /** Which Mac this state comes from. */
+    val macName: String = "",
 )
 
 enum class VoiceState { OFF, CONNECTING, LISTENING, SPEAKING }
 
+private const val NOT_PAIRED = "Not paired. Run npm run pair on a Mac."
+
 /**
- * Keeps a WebSocket open to the Mac bridge over Wi-Fi and exposes the agent's
- * state. All callbacks are marshalled onto the main thread.
+ * Keeps a WebSocket open over Wi-Fi to the bridge on whichever Mac [macs]
+ * picks, and exposes that agent's state. All callbacks run on the main thread.
  */
 class BridgeClient(context: Context) {
     val state = MutableStateFlow(AgentState())
+    /** Errors to flash on screen. */
     val events = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    /** Neutral notes to flash on screen, e.g. which Mac it switched to. */
+    val info = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val voice = MutableStateFlow(VoiceState.OFF)
     val caption = MutableStateFlow("")
 
@@ -53,14 +60,24 @@ class BridgeClient(context: Context) {
     private var http: OkHttpClient? = null
     private var running = false
     private var generation = 0
+    private var target: Target? = null
 
-    private val configured = BuildConfig.BRIDGE_HOST.isNotEmpty() && BuildConfig.BRIDGE_TOKEN.isNotEmpty()
+    val macs: MacDirectory = MacDirectory(
+        context,
+        onTarget = { t ->
+            target = t
+            if (t == null) drop(if (macs.entries.value.none { it.paired }) NOT_PAIRED else "Looking for your Macs…") else connect()
+        },
+        isBusy = { voice.value != VoiceState.OFF },
+        onSwitched = { name -> info.tryEmit("On $name") },
+    )
 
     private val wifiCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(n: Network) {
             main.post {
                 network = n
-                connect()
+                drop(if (macs.entries.value.none { it.paired }) NOT_PAIRED else "Looking for your Macs…")
+                macs.start(n)
             }
         }
 
@@ -68,6 +85,7 @@ class BridgeClient(context: Context) {
             main.post {
                 if (network == n) {
                     network = null
+                    macs.stop()
                     drop("Wi-Fi lost")
                 }
             }
@@ -77,10 +95,6 @@ class BridgeClient(context: Context) {
     fun start() {
         if (running) return
         running = true
-        if (!configured) {
-            state.value = AgentState(notice = "Not paired. Run pair-watch on the Mac and reinstall.")
-            return
-        }
         state.value = AgentState(notice = "Waiting for Wi-Fi…")
         // The watch normally reaches the internet through the phone over Bluetooth,
         // which cannot see the Mac's LAN address. Ask for Wi-Fi explicitly.
@@ -94,7 +108,8 @@ class BridgeClient(context: Context) {
         if (!running) return
         running = false
         main.removeCallbacksAndMessages(null)
-        if (configured) runCatching { cm.unregisterNetworkCallback(wifiCallback) }
+        runCatching { cm.unregisterNetworkCallback(wifiCallback) }
+        macs.stop()
         network = null
         drop("Stopped")
     }
@@ -111,8 +126,9 @@ class BridgeClient(context: Context) {
 
     private fun connect() {
         val net = network ?: return
+        val mac = target ?: return
         if (!running) return
-        drop("Connecting…")
+        drop("Connecting to ${mac.name}…")
         val gen = generation
         val client = OkHttpClient.Builder()
             .socketFactory(net.socketFactory)
@@ -120,10 +136,10 @@ class BridgeClient(context: Context) {
             .pingInterval(15, TimeUnit.SECONDS)
             .build()
         http = client
-        val url = "ws://${BuildConfig.BRIDGE_HOST}:${BuildConfig.BRIDGE_PORT}/watch"
+        val url = "ws://${mac.host}:${mac.port}/watch"
         socket = client.newWebSocket(Request.Builder().url(url).build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                webSocket.send(JSONObject().put("type", "hello").put("token", BuildConfig.BRIDGE_TOKEN).toString())
+                webSocket.send(JSONObject().put("type", "hello").put("token", mac.token).toString())
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -135,11 +151,11 @@ class BridgeClient(context: Context) {
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                main.post { if (gen == generation) retry(if (code == 4401) "Bridge rejected the token" else "Mac bridge closed") }
+                main.post { if (gen == generation) retry(if (code == 4401) "${mac.name} no longer knows this watch. Pair again." else "${mac.name}'s bridge closed") }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                main.post { if (gen == generation) retry("Can't reach the Mac") }
+                main.post { if (gen == generation) retry("Can't reach ${mac.name}") }
             }
         })
     }
@@ -169,6 +185,7 @@ class BridgeClient(context: Context) {
                     approval = approval?.optString("summary"),
                     notice = m.optString("notice"),
                     voiceAvailable = m.optBoolean("voice"),
+                    macName = m.optJSONObject("mac")?.optString("name").orEmpty(),
                 )
             }
             "voice" -> {

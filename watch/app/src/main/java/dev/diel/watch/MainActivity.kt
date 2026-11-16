@@ -14,6 +14,17 @@ import android.os.Vibrator
 import android.speech.RecognizerIntent
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.focus.FocusRequester
+import androidx.wear.compose.foundation.rotary.RotaryScrollableDefaults
+import androidx.wear.compose.foundation.rotary.rotaryScrollable
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -92,6 +103,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun DielScreen(client: BridgeClient, buzz: (Boolean) -> Unit, demo: String? = null, demoVoice: String? = null) {
     val liveState by client.state.collectAsStateWithLifecycle()
@@ -101,6 +113,12 @@ fun DielScreen(client: BridgeClient, buzz: (Boolean) -> Unit, demo: String? = nu
     val context = LocalContext.current
     var pending by remember { mutableStateOf<String?>(null) }
     var flash by remember { mutableStateOf<String?>(null) }
+    var note by remember { mutableStateOf<String?>(null) }
+    var showPicker by remember { mutableStateOf(false) }
+    var pairingBusy by remember { mutableStateOf(false) }
+    val macs by client.macs.entries.collectAsStateWithLifecycle()
+    val auto by client.macs.auto.collectAsStateWithLifecycle()
+    val pairPrompt by client.macs.pairPrompt.collectAsStateWithLifecycle()
 
     // Tell the wearer when the agent starts needing them, and when it finishes.
     var previous by remember { mutableStateOf(state.status) }
@@ -116,6 +134,21 @@ fun DielScreen(client: BridgeClient, buzz: (Boolean) -> Unit, demo: String? = nu
             flash = it
             delay(2500)
             flash = null
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        client.info.collect {
+            note = it
+            delay(2500)
+            note = null
+        }
+    }
+    val pair = { id: String ->
+        pairingBusy = true
+        client.macs.pair(id) { error ->
+            pairingBusy = false
+            if (error != null) flash = error else { showPicker = false; buzz(false) }
         }
     }
 
@@ -174,8 +207,21 @@ fun DielScreen(client: BridgeClient, buzz: (Boolean) -> Unit, demo: String? = nu
             .alpha(if (dimmed) 0.4f else 1f),
         contentAlignment = Alignment.Center,
     ) {
+        val prompt = pairPrompt
         if (heard != null) {
             Confirming(heard, onCancel = { pending = null })
+        } else if (prompt != null && !showPicker) {
+            PairPrompt(prompt.name, pairingBusy, onPair = { pair(prompt.id) }, onDecline = { client.macs.declinePairing(prompt.id) })
+        } else if (showPicker) {
+            BackHandler { showPicker = false }
+            MacPicker(
+                macs = macs,
+                auto = auto,
+                onAuto = { client.macs.chooseAuto(); showPicker = false },
+                onPick = { id -> client.macs.choose(id); showPicker = false },
+                onPair = { id -> pair(id) },
+                onForget = { id -> client.macs.forget(id); buzz(false) },
+            )
         } else {
             AgentButton(
                 status = state.status,
@@ -183,16 +229,19 @@ fun DielScreen(client: BridgeClient, buzz: (Boolean) -> Unit, demo: String? = nu
                 modifier = Modifier
                     .fillMaxSize(0.97f)
                     .clip(CircleShape)
-                    .clickable(enabled = state.status != Status.OFFLINE || voice != VoiceState.OFF) {
-                        touched++
-                        talk()
-                    },
+                    .combinedClickable(
+                        onLongClick = { touched++; showPicker = true },
+                        onClick = {
+                            touched++
+                            if (state.status != Status.OFFLINE || voice != VoiceState.OFF) talk() else showPicker = true
+                        },
+                    ),
             )
             // Text only when something is wrong: an error, or why it's offline.
-            val note = flash ?: state.notice.takeIf { state.status == Status.OFFLINE }
-            if (!note.isNullOrEmpty()) {
+            val line = flash ?: note ?: state.notice.takeIf { state.status == Status.OFFLINE }
+            if (!line.isNullOrEmpty()) {
                 Text(
-                    text = note,
+                    text = line,
                     fontSize = 11.sp,
                     lineHeight = 13.sp,
                     color = if (flash != null) statusColor(Status.ERROR) else Color(0xFF8A8F98),
@@ -206,6 +255,95 @@ fun DielScreen(client: BridgeClient, buzz: (Boolean) -> Unit, demo: String? = nu
             }
         }
     }
+}
+
+@Composable
+private fun PairPrompt(name: String, busy: Boolean, onPair: () -> Unit, onDecline: () -> Unit) {
+    Column(
+        Modifier.fillMaxSize().padding(horizontal = 34.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text("Pair with", fontSize = 13.sp, color = Color(0xFF8A8F98))
+        Text(name, fontSize = 16.sp, textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Spacer(Modifier.height(14.dp))
+        Pill(if (busy) "Pairing…" else "Pair", statusColor(Status.IDLE), enabled = !busy, onClick = onPair)
+        Spacer(Modifier.height(8.dp))
+        Pill("Not now", Color(0xFF2C3038), enabled = !busy, onClick = onDecline)
+    }
+}
+
+/** Long-press the pet: follow the Mac you use, or stay on one. */
+@Composable
+private fun MacPicker(
+    macs: List<MacEntry>, auto: Boolean, onAuto: () -> Unit, onPick: (String) -> Unit, onPair: (String) -> Unit, onForget: (String) -> Unit,
+) {
+    val scroll = rememberScrollState()
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+    Column(
+        Modifier
+            .fillMaxSize()
+            .rotaryScrollable(RotaryScrollableDefaults.behavior(scroll), focus)
+            .verticalScroll(scroll)
+            .padding(horizontal = 22.dp, vertical = 30.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text("Talk to", fontSize = 13.sp, color = Color(0xFF8A8F98))
+        PickerRow("Auto", "Last used Mac", selected = auto, onClick = onAuto)
+        for (m in macs.filter { it.paired }) {
+            PickerRow(
+                m.name,
+                when {
+                    m.current -> "Connected"
+                    m.reachable -> "Nearby"
+                    else -> "Not found"
+                },
+                selected = !auto && m.current,
+                onClick = { onPick(m.id) },
+                onLongClick = { onForget(m.id) },
+            )
+        }
+        for (m in macs.filter { !it.paired && it.pairing }) PickerRow(m.name, "Tap to pair", selected = false, onClick = { onPair(m.id) })
+        if (macs.any { it.paired }) {
+            Text("Long-press a Mac to forget it", fontSize = 11.sp, color = Color(0xFF8A8F98), textAlign = TextAlign.Center)
+        } else {
+            Text("Run npm run pair on a Mac to add it.", fontSize = 11.sp, color = Color(0xFF8A8F98), textAlign = TextAlign.Center)
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun PickerRow(title: String, subtitle: String, selected: Boolean, onClick: () -> Unit, onLongClick: (() -> Unit)? = null) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(22.dp))
+            .background(if (selected) Color(0xFF26324A) else Color(0xFF1C1F25))
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .padding(horizontal = 14.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(subtitle, fontSize = 11.sp, color = Color(0xFF8A8F98), maxLines = 1)
+        }
+        if (selected) Text("✓", fontSize = 14.sp, color = statusColor(Status.IDLE))
+    }
+}
+
+@Composable
+private fun Pill(label: String, color: Color, enabled: Boolean = true, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .clip(CircleShape)
+            .background(color)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 22.dp, vertical = 10.dp),
+        contentAlignment = Alignment.Center,
+    ) { Text(label, fontSize = 14.sp, color = Color.White) }
 }
 
 @Composable
