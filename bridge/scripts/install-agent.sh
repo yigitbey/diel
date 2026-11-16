@@ -12,6 +12,11 @@ NODE="$(command -v node)"
 DOMAIN="gui/$(id -u)"
 
 launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+# bootout returns before the old instance is gone; bootstrap fails until it is.
+for _ in {1..50}; do
+  launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 || break
+  sleep 0.1
+done
 
 if [[ "${1:-}" == "uninstall" ]]; then
   rm -f "$PLIST"
@@ -20,6 +25,13 @@ if [[ "${1:-}" == "uninstall" ]]; then
 fi
 
 mkdir -p "$HOME/.diel" "$HOME/Library/LaunchAgents"
+
+# Pass DIEL_* settings through to the agent, e.g. DIEL_PORT=8792 ./scripts/install-agent.sh
+ENV_XML=""
+for var in DIEL_PORT DIEL_NAME DIEL_CWD DIEL_VOICE; do
+  if [[ -n "${(P)var:-}" ]]; then ENV_XML+="    <key>$var</key><string>${(P)var}</string>"$'\n'; fi
+done
+[[ -n "$ENV_XML" ]] && ENV_XML="  <key>EnvironmentVariables</key>"$'\n'"  <dict>"$'\n'"$ENV_XML  </dict>"
 cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -32,6 +44,7 @@ cat > "$PLIST" <<PLIST
     <string>src/main.ts</string>
   </array>
   <key>WorkingDirectory</key><string>$BRIDGE_DIR</string>
+$ENV_XML
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
