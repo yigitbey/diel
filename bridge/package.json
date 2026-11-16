@@ -1,0 +1,21 @@
+{
+  "name": "diel-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Mac-side bridge between a Codex app-server and the Diel watch app",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "start": "node src/main.ts",
+    "test": "node --test --test-force-exit test/*.test.ts",
+    "pair-watch": "node scripts/pair-watch.ts",
+    "spike": "node spike/probe.ts"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.5.13"
+  }
+}

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.gradle/
+build/
+local.properties
+watch/bridge.properties
+*.apk
+.DS_Store
+.idea/
+.kotlin/
+bridge/spike/schema/
